@@ -9,6 +9,7 @@ mongoose.connect("mongodb://127.0.0.1:27017/notifications")
   });
 
 const notificationSchema = new mongoose.Schema({
+  requestId: { type: String, unique: true },
   to: String,
   message: String,
   channel: String,
