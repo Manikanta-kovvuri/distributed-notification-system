@@ -16,8 +16,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.worker
-    ports:
-      - "4000:4000"   # ⭐ expose worker metrics
     depends_on:
       - mongo
       - kafka
