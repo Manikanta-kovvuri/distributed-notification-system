@@ -1,44 +1,115 @@
+const express = require("express");
+const connectDB = require("../config/db");
 const Notification = require("../models/notification.model");
-const { sentCounter, failedCounter } = require("../metrics/metrics");
+const { consumer, producer } = require("../config/kafka");
 
+const {
+  sentCounter,
+  failedCounter,
+  retryCounter,
+  queueCounter,
+  client,
+} = require("../metrics/metrics");
+
+/* ==============================
+   METRICS SERVER (WORKER)
+============================== */
+const app = express();
+
+app.get("/metrics", async (req, res) => {
+  res.set("Content-Type", client.register.contentType);
+  res.send(await client.register.metrics());
+});
+
+app.listen(4000, () => {
+  console.log("📊 Worker metrics running on port 4000");
+});
+
+/* ==============================
+   WORKER LOGIC
+============================== */
 async function startWorker() {
-  console.log("🚀 Worker started...");
+  await connectDB();
 
-  setInterval(async () => {
-    const job = await Notification.findOneAndUpdate(
-      { status: "pending" },
-      { status: "processing" },
-      { new: true }
-    );
+  await producer.connect();
+  await consumer.connect();
 
-    if (!job) return;
+  await consumer.subscribe({ topic: "notifications" });
+  await consumer.subscribe({ topic: "notifications-retry" });
 
-    console.log("📦 Processing:", job._id);
+  console.log("🚀 Worker listening...");
 
-    try {
-      if (Math.random() < 0.3) throw new Error("Failed");
+  await consumer.run({
+    eachMessage: async ({ topic, message }) => {
 
-      job.status = "sent";
-      await job.save();
+      const job = JSON.parse(message.value.toString());
 
-      sentCounter.inc();
-      console.log("✅ Sent");
+      console.log("=================================");
+      console.log("📦 Topic:", topic);
+      console.log("📨 Job ID:", job.id);
 
-    } catch {
-      job.retryCount++;
+      queueCounter.inc();
 
-      if (job.retryCount >= 3) {
-        job.status = "dlq";
-        failedCounter.inc();
-        console.log("🗑️ DLQ");
-      } else {
-        job.status = "pending";
-        console.log("🔁 Retry");
+      const notif = await Notification.findById(job.id);
+
+      if (!notif) {
+        console.log("⚠️ Notification not found");
+        queueCounter.dec();
+        return;
       }
 
-      await job.save();
-    }
-  }, 3000);
+      try {
+        console.log("⚙️ Processing notification...");
+
+        // simulate random failure
+        if (Math.random() < 0.3) throw new Error("Send failed");
+
+        notif.status = "sent";
+        await notif.save();
+
+        sentCounter.inc();
+
+        console.log("✅ Sent successfully");
+
+      } catch (err) {
+
+        notif.retryCount++;
+        console.log("🔁 Retry count:", notif.retryCount);
+
+        if (notif.retryCount >= 3) {
+
+          notif.status = "dlq";
+          await notif.save();
+
+          failedCounter.inc();
+
+          await producer.send({
+            topic: "notifications-dlq",
+            messages: [{ value: JSON.stringify({ id: notif._id }) }],
+          });
+
+          console.log("🗑️ Sent to DLQ");
+
+        } else {
+
+          notif.status = "pending";
+          await notif.save();
+
+          retryCounter.inc();
+
+          await producer.send({
+            topic: "notifications-retry",
+            messages: [{ value: JSON.stringify({ id: notif._id }) }],
+          });
+
+          console.log("🔁 Sent to retry queue");
+        }
+      }
+
+      queueCounter.dec();
+      console.log("=================================");
+    },
+  });
 }
 
 startWorker();

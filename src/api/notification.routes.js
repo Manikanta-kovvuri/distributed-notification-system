@@ -1,27 +1,76 @@
 const express = require("express");
 const router = express.Router();
 const Notification = require("../models/notification.model");
+const { producer } = require("../config/kafka");
 
-router.post("/send", async (req, res) => {
-  const { requestId, to, message, channel } = req.body;
+/* connect producer only once */
+let kafkaConnected = false;
 
-  const existing = await Notification.findOne({ requestId });
-
-  if (existing) {
-    return res.json({
-      success: true,
-      message: "Duplicate request ignored"
-    });
+async function ensureKafka() {
+  if (!kafkaConnected) {
+    await producer.connect();
+    kafkaConnected = true;
+    console.log("🟢 Kafka Producer Connected");
   }
+}
 
-  const notification = await Notification.create({
-    requestId,
-    to,
-    message,
-    channel
-  });
+/* ==============================
+   SEND NOTIFICATION
+============================== */
+router.post("/send", async (req, res) => {
+  try {
+    const { requestId, to, message, channel } = req.body;
 
-  res.json({ success: true, id: notification._id });
+    const existing = await Notification.findOne({ requestId });
+
+    if (existing) {
+      return res.json({
+        success: true,
+        message: "Duplicate request ignored"
+      });
+    }
+
+    const notification = await Notification.create({
+      requestId,
+      to,
+      message,
+      channel
+    });
+
+    // ⭐ SEND EVENT TO KAFKA
+    await ensureKafka();
+
+    await producer.send({
+      topic: "notifications",
+      messages: [
+        {
+          value: JSON.stringify({
+            id: notification._id.toString(),
+            requestId: notification.requestId
+          })
+        }
+      ]
+    });
+
+    res.json({ success: true, id: notification._id });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false });
+  }
+});
+
+/* ==============================
+   DEBUG ROUTE (VIEW DB DATA)
+============================== */
+router.get("/debug", async (req, res) => {
+  try {
+    const data = await Notification.find().sort({ createdAt: -1 });
+    res.json(data);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false });
+  }
 });
 
 module.exports = router;
