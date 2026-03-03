@@ -7,6 +7,8 @@ const { producer } = require("../config/kafka");
 let kafkaConnected = false;
 
 async function ensureKafka() {
+  if (!producer) return; // 🚀 Skip Kafka in Railway
+
   if (!kafkaConnected) {
     await producer.connect();
     kafkaConnected = true;
@@ -37,20 +39,22 @@ router.post("/send", async (req, res) => {
       channel
     });
 
-    // ⭐ SEND EVENT TO KAFKA
-    await ensureKafka();
+    // 🚀 Only send to Kafka if producer exists
+    if (producer) {
+      await ensureKafka();
 
-    await producer.send({
-      topic: "notifications",
-      messages: [
-        {
-          value: JSON.stringify({
-            id: notification._id.toString(),
-            requestId: notification.requestId
-          })
-        }
-      ]
-    });
+      await producer.send({
+        topic: "notifications",
+        messages: [
+          {
+            value: JSON.stringify({
+              id: notification._id.toString(),
+              requestId: notification.requestId
+            })
+          }
+        ]
+      });
+    }
 
     res.json({ success: true, id: notification._id });
 
